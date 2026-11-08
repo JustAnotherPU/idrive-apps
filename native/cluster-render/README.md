@@ -115,6 +115,28 @@ cluster is offered, and what differs is in "iDrive 8".
   timeout, and is `parked` (behind the holder the table names) until the
   KOMBI shows it. A parked target stages and flushes nothing. Nobody
   wanting it, it is released at once, with no linger.
+- **Giving way** (contributed by [eroobeeroo](https://github.com/eroobeeroo)).
+  A target with `<target>_yield_slots` (the HUD: `0x322`, where its media
+  and list pop-ups show, VERIFIED on a G05) gives way while the stock HMI
+  shows content there: asking for the target again while a pop-up showed
+  pushed the pop-up from the HUD to the cluster. It is asked for again
+  `<target>_yield_ms` (1500) after the pop-up goes, and an overlay-only
+  target gives way to stock content parked behind it the same way.
+- **The HUD** (iDrive 7, `hud`): slot 0x323 only, the slot the HUD map of
+  [eroobeeroo](https://github.com/eroobeeroo) was shown in on a G80 and a
+  G05 (VERIFIED there), scene 0x01000400, class 0.
+  - Another `hud_slot` or `hud_scene_id`, or `hud_take_over_stock` 1,
+    leaves the HUD out: the
+    service runs without it and logs why (`target hud left out: …`). It
+    never takes a slot from the stock HMI, so BMW's own HUD content (its
+    guidance, 0x01000210, in 0x330-0x332) is never unmapped; it gives way
+    to the HUD's pop-ups (below).
+  - Its scene id is `panel`'s: the two are never asked for at once
+    ("Scene ids").
+  - It has the HUD's share of the budget ("Upload budget"): up to half of
+    it, only as much as it writes, and nothing it shows the governor moves
+    the cap.
+  - The mapping guard disables it after two strikes, and only it.
 - **Take-over.** A target with `<target>_take_over_stock` (the map's
   default) takes the slot from the stock HMI, as long as a wanting layer
   has `contend`, such as the Waze map:
@@ -212,19 +234,50 @@ cluster is offered, and what differs is in "iDrive 8".
   goes at once. A slot the display takes is gone without a fade, and so is
   everything on SIGTERM.
 - **Guide hold** (iDrive 7, `guide_hold = 1`, the default). While `map`
-  is shown, and only then, the service holds each slot of `guide_slots`
-  (default 0x105, where the stock HMI maps its CarPlay maneuver panel,
-  content 0x01000310, class 0, VERIFIED on the car; 0x103 on units whose
-  HMI does not find that slot, INFERRED from HmiMain3D)
-  with an empty 16x16 scene of its
-  own (`guide_scene_id`, 0x010004f1, then the next id per slot; only
-  0x010004f1 is in the shipped `scene_ids_allowed`), never drawn, so the box
-  is hidden on the cluster while the map shows. VERIFIED on the car
-  (2026-11-03): the KOMBI takes 0x010004f1 in 0x105, the box is hidden, the
-  HUD keeps its guidance, and the box is back after the release. The HUD's
-  slots are not touched.
-  - Each slot is a target of its own (`guide_0x105`), in the status but in
-    no client's hello or events, and no client can put a layer on it.
+  is shown, and only then, the service holds the slot of the stock HMI's
+  CarPlay maneuver panel (content 0x01000310, class 0) with an empty 16x16
+  scene of its own, never drawn, so the box is hidden on the cluster while
+  the map shows. The box is in 0x105 on one car and in 0x103 on another,
+  whose KOMBI reports 0x105 disabled and empty (both VERIFIED on the car).
+  With `guide_slots = auto`, the default, the slot is the one the slot
+  table reports the box in, or before the box shows, the one the HMI
+  chooses (below), held with `guide_scene_id`
+  (0x010004f1); a list of slot ids pins a hold to each instead, the first
+  with `guide_scene_id`, each next with the next id (only 0x010004f1 is in
+  the shipped `scene_ids_allowed`). VERIFIED on the car with the slot
+  named (2026-11-03): the KOMBI takes 0x010004f1 in 0x105, the box is
+  hidden, the HUD keeps its guidance, and the box is back after the
+  release; on the other car, with `guide_slots = 0x103`, the box is
+  hidden and a seat-belt warning still shows on the cluster with the map
+  up (its HUD and a head-unit restart not checked). `auto` itself has not
+  run on a car (`slots_test` only). The HUD's slots are not touched.
+  - Each hold is a target of its own (`guide_auto`, or `guide_0x105` for a
+    listed slot), in the status but in no client's hello or events, and no
+    client can put a layer on it.
+  - `auto`: the hold's slot is 0x105 or 0x103; no other slot is ever asked
+    for, and `auto` is refused when another target has either. Before the
+    box is mapped, the slot is the stock HMI's choice for it: 0x105 when the
+    slot table reports it enabled (status 1 or 2), else 0x103 when that one
+    is (`hold moves to slot 0x105, the first of the box's slots the slot
+    table reports enabled ...`), so the hold is in place before the first
+    route, as a fixed slot is. With neither enabled it is not asked for (`no
+    slot: 0x105 0x103 not reported enabled`). A report with a content of
+    `guide_take_over` mapped (shown or parked) in the other slot, the slot
+    not disabled, moves the hold there (`hold moves to slot 0x103, where the
+    slot table reports 0x1000310 ...`); shown wins over parked, then the
+    slot it has, then 0x105. It is released from the old one first when it
+    is held, so it never holds two slots, then asked for in the new one like
+    any request
+    (at least 1 s after the last, after the release is confirmed, and no
+    sooner than a wait on the retry ladder it was in). The box unmapped (the
+    route over) or mapped only in another slot, the hold keeps its slot.
+    Each move counts as a loss towards the give-up (below), never as a
+    fault, so a box that keeps moving gives the hold up. The mapping guard
+    counts the hold as one mapping in both slots (`guide_auto auto 0x10004f1
+    0`): a move never escapes a strike, and two in either or both slots
+    disable it. The box's slot is in the log either way: `dcsm: slot 0x103
+    status 2 content 0x1000310 class 0 map 1`. A car that needs a fixed slot
+    sets `guide_slots = 0x103` (or any slot) in `cluster-render.local.conf`.
   - The map's clients choose: while any layer that wants `map` has
     `guide_hold` 0 (PROTOCOL.md), the hold is not asked for, and one held is
     released; the status names such a layer (`guide_hold 0`). A client
@@ -250,12 +303,13 @@ cluster is offered, and what differs is in "iDrive 8".
     to …`), and not asked for while that is shown there. Other content
     only parked there (map status 3) is neither taken over nor yielded to.
   - More than 3 losses within 60 s (our scene removed, unmapped, parked
-    again behind other content, or released to yield; not to a lock) give
-    it up until the service next starts (`hold given up`). When none of
-    those losses was BMW's own content taking the slot (a yield, a re-park
-    behind it, or our scene unmapped or removed while content off
-    `guide_take_over` is shown there, such as the seat-belt panel), the
-    give-up is also a strike of the mapping guard against it (below).
+    again behind other content, or released to yield, not to a lock; or a
+    move with `auto`) give it up until the service next starts (`hold given
+    up`). When none of those losses was BMW's own content taking the slot
+    (a yield, a re-park behind it, or our scene unmapped or removed while
+    content off `guide_take_over` is shown there, such as the seat-belt
+    panel) or a move with `auto`, the give-up is also a strike of the
+    mapping guard against it (below).
   - The KOMBI's watchdog for our client is fed by our own heartbeats every
     250 ms (`dcsm/dcsm_client.cpp`); a take-over's unmap goes with the
     HMI's handle, so it does not feed ours (INFERRED: the KOMBI restarts
@@ -295,26 +349,27 @@ cluster is offered, and what differs is in "iDrive 8".
     without the hold.
   - Settings take effect at the service's next start (`systemctl restart
     cluster-render`). `guide_hold` other than 0 or 1 counts as 1. A
-    malformed slot, scene id, class or take-over list (a slot that is not
-    whole hex from 0x1 to 0xfff, listed twice, or a scene id not in
+    malformed slot, scene id, class or take-over list (`auto` with slot
+    ids, a slot that is not whole hex from 0x1 to 0xfff, listed twice, or
+    a scene id not in
     `scene_ids_allowed` or another target's) keeps the hold off, the safe
     choice: the service runs without it, and the log says why (`guide hold
     off: …`).
 - **Mapping guard** (`src/guard.h`). A mapping the KOMBI cannot take can
   make it restart the cluster and the HUD (scene ids 7702 and 7703 did), and
   the service would map it again after every restart and every boot. Only
-  a guide hold can be disabled; the map, `panel` and `hud` only have their
-  strikes logged, and the map's mapping in 0x100 with 0x010004f0, the one
+  a guide hold and the HUD can be disabled; the map and `panel` only have
+  their strikes logged, and the map's mapping in 0x100 with 0x010004f0, the one
   the car has shown for longest, is never disabled whatever the file says.
   - A mapping event is our request of a target and the display's first
     showing of it after that request. A re-park or re-show the KOMBI makes
     on its own is none.
   - The display service (Dcsm2, or iDrive 8's DCSM) going away within 10 s
-    of a hold's mapping event, held still or released since, is a strike
-    against that hold's mapping (its slot, scene id and class), even when
-    the map had a later event; the
-    map, `panel` and `hud` are never blamed while a hold's event is in the
-    window. With no hold's event in it, the target with the latest event
+    of a hold's or the HUD's mapping event, held still or released since, is
+    a strike against that mapping (its slot, scene id and class), even when
+    the map had a later event; the map and `panel` are never blamed while
+    such an event is in the window. With a hold's and the HUD's both in it,
+    the latest is struck. With neither, the target with the latest event
     gets the strike, logged only. A KOMBI restart takes its SOME/IP
     service, and with it Dcsm2's TCP connection, away (INFERRED;
     CAR-ONLY). A scene removed, a silent heartbeat or a slot table without
@@ -322,16 +377,19 @@ cluster is offered, and what differs is in "iDrive 8".
     link or the KOMBI's own arbitration, so they are no strike by
     themselves. A restart that does not follow a mapping event within the
     window (the KOMBI also restarts on its own) is no strike.
-  - A hold giving up on faults alone (more than 3 losses within 60 s,
-    none of them BMW's own content taking the slot, above) is a strike
+  - A hold giving up on faults alone (more than 3 losses within 60 s, none
+    of them BMW's own content taking the slot or a move, above) is a strike
     too, which covers a KOMBI renderer that restarts with Dcsm2 staying up,
     and so is a map refused with E_DCSM_SLOTID_UNKNOWN. A give-up with a
     yield among its losses (a seat-belt or passenger-seat alert that keeps
     coming back) only stops the hold until the service next starts.
   - Two strikes disable the hold's mapping: never asked for again, the
     box shown, the map's clients told (`guide_disabled` in the map's
-    `target` event, PROTOCOL.md), and `status` says so (`guard: guide_0x105
-    0x105 0x10004f1 0: disabled, 2 strikes`).
+    `target` event, PROTOCOL.md), and `status` says so (`guard: guide_auto
+    auto 0x10004f1 0: disabled, 2 strikes`). Two strikes disable the HUD's
+    the same way: never asked for again, however often its layers come and
+    go, its clients told (`disabled` in the HUD's `target` event), the map
+    untouched (`guard: hud 0x323 0x1000400 0: disabled, 2 strikes`).
   - A strike stops counting after three boots with no other against the
     same mapping; a disabled mapping stays disabled.
   - The strikes are kept in `guard_path`
@@ -395,6 +453,27 @@ evidence at other times is logged, not counted:
   for 10 min before any step up: on the car the KOMBI dropped the map again
   within a minute of the cap going back up.
 
+**The HUD's share** (`kit/upload_pacer.h` share_of, `TargetSpec::share`).
+While the HUD is asked for and has a layer, its layers and assets write from
+a budget of their own: up to half of each refill of the budget, but only as
+much as they spend; what the HUD leaves goes back to the other targets in
+the same refill, so a still or small HUD costs the cluster almost nothing
+(while the cluster writes, the HUD takes at most half of each refill). The
+cluster never gets less than half while the HUD writes, and everything when
+it does not. While the
+cluster's budget sits full, nothing written since a refill filled it (a
+still cluster map, or the HUD alone), the HUD gets the whole refill: then
+the whole cap. The two together never hold more than one burst (what the
+HUD holds comes off what the cluster may hold), so together they send at
+most the burst and the cap's rate over any time, as the cluster alone; the
+ceiling is unchanged. With no HUD layer, the cluster's writes go exactly as
+they would without a HUD, byte for byte and tick for tick
+(`compositor_test`). The HUD's resend is charged to its share too, evidence
+from it (a flush, a refusal, a scene removed) is logged, never counted, and
+its writes are not the link's load the governor counts evidence and healthy
+time by: a HUD the KOMBI drops never lowers the cluster's cap, and the HUD
+alone writing never raises it.
+
 Down is quick and up is slow, so the cap does not oscillate. Within the cap,
 the top layers write first, and in a video layer a
 frame whose exact write the budget cannot cover goes packed, the exact atlas
@@ -406,7 +485,8 @@ The cap and why it is what it is are in the status
 scene removed`). Every client also gets a `budget` event when it changes.
 Once a minute, each shown target logs what its layers wrote since its last
 such line, and whether it is rendered: `target map: in the last 60 s its
-layers wrote 1800 frames, 52000 KB, 0 failed, 12 budget holds; rendered:
+layers wrote 1800 frames (18 ms from offer to flush on average), 52000 KB, 0
+failed, 12 budget holds; rendered:
 renderer 00000000-0000-0000-0000-000000000001 subscribed for 412 s`.
 
 ## Layers
@@ -454,15 +534,30 @@ share a 2D pass, and the passes' render order follows the stack exactly
   service. Clients reconnect by themselves (0.25, 0.5, 1, then every 2 s).
   They make their assets and layers again with their last settings:
   uniforms, mesh parts with their geometry and transforms, binds and
-  animations; and send their images and assets whole.
-- A client's layers go with its connection, then its assets. A video layer whose frames stop
-  for `stall_ms` stops wanting its slot, which is released after it fades
-  out and the linger.
+  animations; and send their images and assets whole, and a video layer's
+  last frame whole in place of its next repeat.
+- A client's layers go with its connection, then its assets. A video layer whose frames
+  (or repeats) stop for `stall_ms` stops wanting its slot, which is released
+  after it fades out and the linger.
 - On SIGTERM every target is unmapped and unfetched, the guide hold's
   included. If the service dies, the KOMBI's watchdog drops its content
   within about 10 s and systemd starts it again: the watchdog is per client
   handle and unmaps every mapping of it (`dcsm/DCSM.md` "Heartbeat"), and
   the guide hold is a mapping of the same client as the map.
+
+## Supported head units
+
+Every head-unit variant runs, HIGH F included (0.3.9 refused it). On a
+head unit whose variant cannot be read, a kernel command line with no
+`hwvariant=` or two that disagree (`src/head_unit.cpp`, the rule
+waze-on-cluster's patches follow too), cluster-render starts nothing that
+reaches the cluster: neither the generation's service nor Dcsm2, vsomeip
+or RAMSES. It
+logs the reason once and stays up holding only its socket, so neither the
+socket nor `Restart=on-failure` starts it again: a status request gets
+`not supported on this car (head unit: ...)`, any other message an `error`
+event with that reason, and the status file says the same. A SIGTERM ends
+it with 0.
 
 ## Identity and packaging
 
@@ -604,6 +699,7 @@ another content, its own content and scene id CAR-ONLY (below):
 | `hud` | `Ca_ComCenter_HUD` 43100202 | 43204012 | 353x203, all shown | the HUD, above its speed bar |
 | `guide` | `Ca_GuidingPanel_IC` 43100401 | 43204051, a dynamic content | 702x213, all shown | the top centre of the cluster, over the map in the normal layout |
 | `widget` | `Ca_Widget_IC` 43100301 | 43204001, a dynamic widget (43202001-43205000) | canvas 2240x896, most of it shown (below) | the middle of the cluster once picked in its widget menu, with the entry `id8_widget_description`, `_order` and `_preview` |
+| `popup` | `Ca_Widget_IC` 43100301 | 43204003, a dynamic widget | canvas 2240x896, as `widget` | the middle of the cluster, on a black middle, by itself while a client draws on it: a focus request with the offer |
 
 - Target names are iDrive 7's where the place matches, so a client asking
   for `map` gets the cluster's middle. waze-on-cluster stays iDrive 7 only:
@@ -621,6 +717,36 @@ another content, its own content and scene id CAR-ONLY (below):
   690-1530, y 185-700 in the M layout, with a black notch at the top middle
   down to about y 167 (VERIFIED on the car with a grid drawn over the whole
   canvas).
+- A widget's offer can carry its background (`id8_<target>_background_id`)
+  and the cluster views it is shown in (`_layouts`), and ask the cluster to
+  show it (`_focus` 1: `enableFocusRequest` with each offer). VERIFIED on
+  the car (an M4 in its ROAD view, layout 4) with icwidget, a test provider
+  of ours making the same calls as communication user 802:
+  - a focus request on a widget nobody picked: the cluster switched to it
+    by itself, asking for it 0.1 s and showing it 0.4 to 0.9 s after the
+    offer; it answers with the widget's focus status (focused). A new
+    request (another handle) takes the widget back and shows it again
+    within 0.25 s;
+  - background 43400001, 43400004, 43400005 or 43400006: the cluster blacks
+    out its own artwork in the middle behind the widget, the gauges stay,
+    no new area is sent; 43400002 and 43400003 changed nothing visible;
+  - layouts is a mask of the cluster's views: 1 (ROAD) kept the widget
+    shown, 2 alone made the cluster take it away at once, 255 brought it
+    back; the M SPORT view is layout 5 (category rect 670x527 at 785,170);
+  - a big picture fits best at 1140x480 at 550,220 in layout 4: centred on
+    the cluster (x 1120), its top and bottom edges shown, its sides faded
+    behind the gauge panels;
+  - nothing visible from the displayed-data flags (bits 0-31), the
+    exclusive background, the car model's visibility or id, or the
+    configurator priority (a member of the unit's DcsmMetadataCreator not in
+    the open-source headers); the voice assistant's category
+    (`Ca_IPA_IC` 43100501) and `Ca_Widget_L_Mutex_ComCenter_IC` 43100341
+    were never assigned to a dynamic content.
+- A second participant with the service's communication user gets no
+  answer from any other participant (no offers seen, nothing assigned;
+  VERIFIED on the car with the service running as 801): a test provider
+  run beside the service takes another one (802, the second test user,
+  VERIFIED on the car).
 - In `Ca_GuidingPanel_IC` the cluster showed, by itself and at the place
   in the table, the head unit's own content `C_GuidingPanels_IC` 43201101
   offered as user 801 (VERIFIED on the car: canvas 702x213, the category
@@ -647,12 +773,23 @@ run by hand as `hmi_5000` with `showcase.js all` on `map` and on `widget`:
 - with the same build, a video client drew a camera stream in `widget`,
   hardware-decoded, at 15 fps.
 
+VERIFIED on the car (an M4) with 0.4.1, run by hand as `hmi_5000` beside
+the installed 0.4.0 (communication user 802, its own socket, `id8_targets =
+popup`) with `showcase.js all` on `popup`, the widget picked in the
+cluster's menu another one: `popup` offered, asked for, and shown by the
+cluster by itself 0.44 s after the offer (focus status focused), every
+layer shown; the client gone, its offer stopped after the linger and the
+stop accepted within 60 ms, and the cluster showed the picked widget
+again; SIGTERM: stopped, the head unit kept running.
+
 CAR-ONLY on iDrive 8:
 - the release since 0.2.2 (host-tested only, not in the emulator): the
   scene kept published, warm, and the next request waiting for the stop's
   acceptance;
 - the `hud` target, and how the upload budget fits the cluster's link
   over a long run;
+- how a focus request, the backgrounds and the views mask behave on other
+  iDrive 8 cars than an M4;
 - the `guide` target: its dynamic content shown in `Ca_GuidingPanel_IC`,
   and which content the cluster shows there during route guidance, when
   the head unit offers its own guiding panel in the same category;
@@ -730,16 +867,35 @@ The host tests:
   over no more, the seat-belt panel left alone while parked and yielded to
   while shown, never released by rendering verification, and no flapping;
   never asked for while the table reports its slot disabled, however long
-  ago, or does not name it; the mapping guard: the hold, released since,
+  ago, or does not name it; the HUD under the guard: a display drop after its
+  mapping striking it and not the map, also with the map mapped after it,
+  two disabling it and only it, in that boot and the next, wanting it again
+  not undoing that; `panel` and `hud` never asked for at once; the mapping
+  guard: the hold, released since,
   blamed for the display service going away over a map asked for after it, a re-park and
   re-show by the display no mapping event, a slot refused as unknown a
   strike and never asked for again, a give-up on unmaps alone in each of
   two boots disabling it, give-ups on yields to the seat-belt panel in two
-  boots no strike;
+  boots no strike; with `auto`, the hold in 0x103 or 0x105, whichever has
+  the box with the other disabled, and before the box in 0x105 when it is
+  enabled, else 0x103, never in any other slot or a disabled one, moving
+  with the box and keeping a ladder wait, a box that keeps moving giving
+  it up with no strike, and Dcsm2 drops after its mappings in both slots
+  disabling it at the second, in that boot and the next;
 - `ramses_console_test`: the RAMSES console lines the car's libramses
   prints (subscriptions, unsubscriptions, a renderer gone, resource
   requests), which lines are kept raw, and the raw lines' rate limit;
 - `governor_test`: the budget's steps, cooldown, recovery and probation;
+- `map_upload_test` (the kit's): the HUD's share: its source deciding
+  exactly as alone with the share off, never more than half for a greedy
+  share and never less than half for the source, an unspent share going
+  back, an idle source's whole rate for it, within a burst, and the two
+  together never holding more than one burst (both still, then both
+  greedy);
+- `compositor_test`: the map's flushes byte for byte as without a HUD
+  while the HUD has no layer; with a HUD layer and the map moving at the
+  cap, at least half the bytes for the map and at most half for the HUD at
+  its 10 a second; the HUD alone at its rate, within the cap;
 - `compositor_test`: layers on a fake renderer that keeps pending and
   flushed state apart. It covers dirty, packed and exact writes, failure
   parking, the stack and the closed budget loop: slow flushes lower the cap
@@ -749,7 +905,9 @@ The host tests:
   at most once a second, passes following the stack with an exclusive
   layer, turns, uniform arrays, animations, and a scene published again
   rebuilding all of it; fades in and out and their timing, a parked
-  target staging nothing, and a released target's warm scene;
+  target staging nothing, and a released target's warm scene; the limits
+  (64 layers a client, 96 in all) and 96 small layers changing every tick
+  past the 5500 KB/s ceiling, written within it, each an even share;
 - `dcsm2_port_test`: the Dcsm2 request sequence, parked and promoted
   mappings, take-overs, reply matching and refusal kinds; the undecoded
   notifications' rate limit, subscription answers, the no-answer line and
@@ -760,7 +918,8 @@ The host tests:
   is accepted, a request while it is not, refusals, two targets;
 - `generation_test`: telling iDrive 7 from iDrive 8 by MainApp's folders and
   the running HMI;
-- `holds_test`: the guide hold's settings, on as shipped, `guide_hold`
+- `holds_test`: the HUD's rules (0x323 and its share, any other slot or a
+  take-over refused); the guide hold's settings, on as shipped, `guide_hold`
   other than 0 or 1 taken as 1 with a warning, and every other malformed
   value refused with no hold added (a slot that is not whole hex from 0x1
   to 0xfff, listed twice or another target's, a scene id not allowed or
@@ -886,9 +1045,10 @@ Not verified, needs the car:
     scene (verification), and the unsubscription within 1 s of a release
     (the re-request's wait). The same library logs both on the car, but
     when the KOMBI subscribes has not been seen there;
-  - the guide hold: the box's slot on units coded the other way (0x103;
-    INFERRED), whether their KOMBI takes 0x010004f1 there (the mapping
-    guard disables a hold the KOMBI restarts on), and the hold after a
+  - the guide hold: `guide_slots = auto` choosing the box's slot (VERIFIED
+    only with 0x105 and 0x103 named by hand), the box's slot and whether
+    the KOMBI takes 0x010004f1 there on other units (the mapping guard
+    disables a hold the KOMBI restarts on), and the hold after a
     door-open lock (seen only with `panel`). If the KOMBI ever shows the
     parked 0x01000314 instead of ours after a take-over, the hold yields,
     and that panel stays shown until the HMI parks it again; on the car
@@ -950,8 +1110,8 @@ Not verified, needs the car (iDrive 8): the CAR-ONLY list of "iDrive 8".
 
 ## Releases
 
-A version is `component.json` `version` (`x.y.z`), published once: a
-changed tool needs a higher version before it can be published again. The
+A version is `component.json` `version` (`x.y.z`), published once; the
+release sets it ([`CONTRIBUTING.md`](../../CONTRIBUTING.md)). The
 repository's release tooling (`release/`, its README) builds, checks and
 publishes cluster-render with the repository's other components, from the
 repository's root:

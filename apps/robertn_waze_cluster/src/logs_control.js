@@ -15,13 +15,15 @@
 
 const EventEmitter = require('events');
 const { LineSocket } = require('./waze_cluster_control.js');
+const { t } = require('./i18n.js');
 
 const LOGS_PATH = '/dev/shm/waze-on-cluster/logs.sock';
 const ROWS = 5;
-const ERRORS = { 'no-space': 'Not enough space', 'too-large': 'Logs too large', failed: 'Save failed' };
+/* A failed save, by the service's error (English keys of src/i18n.js). */
+const ERRORS = { 'no-space': 'Not enough space', 'too-large': 'Too large to save', failed: 'Save failed' };
 
 function size(bytes) {
-    return bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    return bytes >= 1048576 ? t('{0} MB', (bytes / 1048576).toFixed(1)) : t('{0} KB', Math.max(1, Math.round(bytes / 1024)));
 }
 
 class LogsControl extends EventEmitter {
@@ -60,7 +62,9 @@ class LogsControl extends EventEmitter {
     }
 
     save() {
-        this.socket.send({ cmd: 'save' });
+        if (this.canSave()) {
+            this.socket.send({ cmd: 'save' });
+        }
     }
 
     canSave() {
@@ -72,24 +76,25 @@ class LogsControl extends EventEmitter {
     }
 
     statusText() {
+        return t('Saved logs: {0}', this._saved());
+    }
+
+    _saved() {
         const s = this.state;
         if (!s) {
-            return this.socket.link === 'absent' ? 'Logs unavailable — restart head unit' : 'Connecting…';
+            return this.socket.link === 'absent' ? t('Unavailable') : t('Connecting…');
         }
         if (s.saving) {
-            return 'Saving…';
+            return t('Saving…');
         }
         if (s.error) {
-            return ERRORS[s.error] || 'Save failed';
+            return t(ERRORS[s.error] || ERRORS.failed);
         }
-        if (s.saved) {
-            return `Saved ${s.saved}`;
-        }
-        return s.archives && s.archives.length ? `${s.archives.length} saved` : 'No logs saved';
+        return s.archives && s.archives.length ? String(s.archives.length) : t('None');
     }
 
     urlText() {
-        return this.state ? this.url() || 'Wi-Fi hotspot off' : '';
+        return t('Address: {0}', this.state ? this.url() || t('Wi-Fi hotspot off') : '—');
     }
 
     /* ROWS rows: the archives, newest first, then empty ones. */
@@ -99,4 +104,4 @@ class LogsControl extends EventEmitter {
     }
 }
 
-module.exports = { LogsControl, LOGS_PATH, ROWS };
+module.exports = { LogsControl, LOGS_PATH, ROWS, ERRORS };

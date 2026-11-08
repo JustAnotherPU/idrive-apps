@@ -16,7 +16,16 @@
  *
  * FakePatch speaks the patch daemon protocol: on connect the log backlog and
  * the current state; apply -> busy, then patched with the asked panel;
- * revert -> busy, then original; status -> the current state.
+ * revert -> busy, then original; an Android Auto change -> busy, then
+ * done after STEP_MS, or with `holdAa` set when the test calls
+ * releaseAa(failure); status -> the current state; a command
+ * while one runs -> refused, to its asker; reboot -> restarting, or with
+ * `rebootFails` set, failed with that code. The map settings per driver
+ * profile as patchd keeps them: `map` the settings in effect, `shared` and
+ * `own` (by id) the rest, `current` the profile last told; profile and
+ * profile-own answer as patchd does (profile-own refused for another id), or
+ * not at all with `profileMute` set (a patchd before profiles); cluster,
+ * hud, hud-size and hud-pos change `map`.
  *
  * FakeLogs speaks the logs socket: on connect its state; save -> saving,
  * then the new archive first in the list (or `failWith` as the error).
@@ -116,6 +125,10 @@ class FakeRender extends LineServer {
         this.reason = null;
         this.hide = 1;
         this.guideDisabled = 0;
+        /* the HUD: off by default; its state while on (hudState null: as the map) */
+        this.hud = 0;
+        this.cluster = 1;
+        this.hudState = null;
         this._showTimer = null;
     }
 
@@ -136,6 +149,11 @@ class FakeRender extends LineServer {
 
     _status() {
         const s = { ev: 'status', state: this.state, target: this.target, page: this.page, reason: this.reason };
+        /* hud null: a tool without the HUD's fields (one refused by its head unit) */
+        if (this.hud !== null) {
+            Object.assign(s, { cluster: this.cluster, hud: this.hud, hud_state: this.hud ? this.hudState || this.state : 'off',
+                hud_width_pct: this.hudWidth || 0, hud_x: this.hudX || 0, hud_y: this.hudY || 0 });
+        }
         if (this.hide !== null) {
             s.hide_bmw_guidance = this.hide;
             s.guide_disabled = this.guideDisabled;
@@ -168,6 +186,19 @@ class FakeRender extends LineServer {
             this.hide = msg.hide;
             this._broadcast(this._status());
         }
+        if (msg.cmd === 'cluster' && msg.on !== undefined) {
+            this.cluster = Number(msg.on);
+            this._broadcast(this._status());
+        }
+        if (msg.cmd === 'hud') {
+            if (msg.on !== undefined) this.hud = Number(msg.on);
+            if (msg.hud_width_pct !== undefined) this.hudWidth = Number(msg.hud_width_pct);
+            /* held inside the HUD, as the render does, when hudMaxX is set */
+            const lim = (v) => (this.hudMaxX ? Math.max(-this.hudMaxX, Math.min(this.hudMaxX, v)) : v);
+            if (msg.hud_x !== undefined) this.hudX = lim(Number(msg.hud_x));
+            if (msg.hud_y !== undefined) this.hudY = Number(msg.hud_y);
+            this._broadcast(this._status());
+        }
     }
 }
 
@@ -181,10 +212,24 @@ class FakePatch extends LineServer {
         this.carplay = null;  /* 'deferred' once a patch is written but not active */
         this.pending = null;  /* 'apply' | 'revert': the change waiting for a head-unit start */
         this.conflict = null; /* why the install left carplay as it was */
+        this.recovered = null; /* boot recovery removed the patch after that many failed starts */
+        this.removable = null;   /* Remove patch would change carplay; null: whether one of ours is on disk, undefined: a daemon that does not send it */
         this.busy = false;
         this.reason = null;
-        this.aa = { state: 'original', density: 180, densities: [150, 400, 10] };   /* Android Auto's patch */
+        this.aa = { state: 'original', density: 180, densities: [150, 400, 10], removable: false };   /* Android Auto's patch */
         this.reboots = 0;     /* reboot commands honoured */
+        this.restart = { state: 'idle' };
+        this.wifi = null;          /* CarPlay's Wi-Fi band: { band: '5' | '2.4', iface, freq } or null */
+        this.rebootFails = null;   /* 'refused' | 'stayed' | 'error': the restart fails so */
+        this.mute = false;         /* commands received and not answered */
+        this.holdAa = false;       /* an Android Auto change stays busy until releaseAa(failure) */
+        this.releaseAa = null;
+        this.map = { cluster: 1, hud: 0, hud_width_pct: 0, hud_offset_x: 0, hud_offset_y: 0 };
+        this.shared = null;
+        this.own = {};
+        this.active = null;
+        this.current = undefined;
+        this.profileMute = false;
         this._rebooting = false;
         this._timer = null;
     }
@@ -200,7 +245,38 @@ class FakePatch extends LineServer {
     _status() {
         return { ev: 'status', state: this.busy ? 'busy' : this.state, panel: this.panel,
             res: this.res, safe: this.safe, carplay: this.carplay, reason: this.reason,
-            pending: this.pending, conflict: this.conflict, aa: this.aa };
+            pending: this.pending, conflict: this.conflict, recovered: this.recovered, aa: this.aa,
+            removable: this.removable !== null ? this.removable : this.pending === 'apply' || (!this.pending && ['patched', 'unknown', 'error'].includes(this.state)),
+            busy: this.busy ? 'carplay' : this.aa.state === 'busy' ? 'aa' : this._rebooting ? 'restart' : null,
+            restart: this.restart, wifi: this.wifi };
+    }
+
+    /* patchd's profileCmd: the settings in effect saved into the entry they
+     * belong to, the profile's own or the shared ones put in effect. */
+    _profile(msg, socket) {
+        const id = msg.id == null ? null : msg.id;
+        if (msg.cmd === 'profile-own' && id !== this.current) {
+            this._send(socket, { ev: 'profile-own-reply', ok: false, reason: 'not the driver profile in effect' });
+            return;
+        }
+        if (msg.cmd === 'profile') this.current = id;
+        if (this.active) this.own[this.active] = this.map; else this.shared = this.map;
+        if (msg.cmd === 'profile-own') {
+            if (msg.on) this.own[id] = this.own[id] || this.map;
+            else delete this.own[id];
+        }
+        const target = id && this.own[id] ? id : null;
+        const want = target ? this.own[target] : this.shared;
+        const changed = JSON.stringify(want) !== JSON.stringify(this.map);
+        this.active = target;
+        this.map = want;
+        this._send(socket, { ev: `${msg.cmd}-reply`, ok: true, id, own: !!target, changed, settings: want });
+    }
+
+    /* CarPlay's Wi-Fi band changes, as patchd sends it: a status. */
+    setWifi(wifi) {
+        this.wifi = wifi;
+        this._broadcast(this._status());
     }
 
     _onConnect(socket) {
@@ -215,8 +291,22 @@ class FakePatch extends LineServer {
     _onCommand(msg, socket) {
         this.received.push(msg);
         this.emit('command', msg);
+        if (this.mute) {
+            return;
+        }
         if (msg.cmd === 'status') {
             this._broadcast(this._status());
+            return;
+        }
+        if (msg.cmd === 'profile' || msg.cmd === 'profile-own') {
+            if (!this.profileMute) this._profile(msg, socket);
+            return;
+        }
+        const MAP = { cluster: ['cluster'], hud: ['hud'], 'hud-size': ['hud_width_pct'], 'hud-pos': ['hud_offset_x', 'hud_offset_y'] };
+        if (MAP[msg.cmd]) {
+            const v = msg.cmd === 'hud-pos' ? [msg.hud_x, msg.hud_y] : [msg.cmd === 'hud-size' ? msg.hud_width_pct : msg.on];
+            this.map = Object.assign({}, this.map);
+            MAP[msg.cmd].forEach((k, i) => { this.map[k] = v[i]; });
             return;
         }
         if (msg.cmd === 'reboot') {
@@ -225,12 +315,20 @@ class FakePatch extends LineServer {
             if (deny) { this._send(socket, { ev: 'reboot-reply', ok: false, reason: deny }); return; }
             this._rebooting = true;
             this.reboots++;
+            this.restart = { state: 'restarting' };
             this._send(socket, { ev: 'reboot-reply', ok: true });
-            this._broadcast({ ev: 'status', state: 'busy', reason: 'restarting the head unit' });
+            this._broadcast(this._status());
+            if (this.rebootFails) {
+                this._rebooting = false;
+                this.restart = { state: 'failed', code: this.rebootFails };
+                if (this.rebootFails === 'stayed') this.restart.possibleAt = Date.now() + 10 * 60000;
+                this._send(socket, { ev: 'reboot-reply', ok: false, reason: this.rebootFails });
+                this._broadcast(this._status());
+            }
             return;
         }
-        if (this.busy) {
-            this._broadcast({ ev: 'status', state: 'busy', reason: 'another operation is running' });
+        if (this.busy || this.aa.state === 'busy' || this._rebooting) {
+            this._send(socket, { ev: 'refused', cmd: msg.cmd, reason: 'another operation is running' });
             return;
         }
         clearTimeout(this._timer);
@@ -238,13 +336,18 @@ class FakePatch extends LineServer {
             const density = msg.cmd === 'aa-density' ? msg.value : this.aa.density;
             const card = msg.cmd === 'aa-card' ? msg.value : this.aa.card || 'shown';
             const after = msg.cmd === 'aa-revert' ? { state: 'original' } : { state: 'patched', dpi: density, diskCard: card };
+            const before = this.aa;
             this.aa = Object.assign({}, this.aa, { state: 'busy', reason: msg.cmd === 'aa-revert' ? 'reverting' : 'applying' });
             this._broadcast(this._status());
-            this._timer = setTimeout(() => {
-                this.aa = { state: after.state, dpi: after.dpi, diskCard: after.diskCard, density, card, densities: this.aa.densities, aapd: 'restarted' };
+            /* failure: the change failed so, the values on disk as they were */
+            const finish = (failure) => {
+                this.aa = failure ? Object.assign({}, before, { state: 'error', reason: failure, error: failure })
+                    : { state: after.state, dpi: after.dpi, diskCard: after.diskCard, density, card, densities: this.aa.densities, aapd: 'restarted', removable: after.state === 'patched' };
                 this.log(msg.cmd + ' done');
                 this._broadcast(this._status());
-            }, STEP_MS);
+            };
+            if (this.holdAa) this.releaseAa = finish;
+            else this._timer = setTimeout(finish, STEP_MS);
         } else if (msg.cmd === 'apply') {
             this.busy = true;
             this.reason = 'applying IC_' + String(msg.panel).toUpperCase();
